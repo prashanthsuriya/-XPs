@@ -56,22 +56,12 @@
   });
 </script>
 <script type="text/babel" data-presets="react">
-const { useState, useRef, useCallback, useEffect } = React;
+const { useState, useRef, useCallback, useEffect, useLayoutEffect } = React;
 
 
 /* ---------------------------------------------------------
    PALETTE
-   void      #14140F  background
-   felt      #17301F  dartboard felt surround
-   feltDeep  #0E2016  darker felt for panels
-   brass     #C9A227  rings / accents / borders
-   brassDim  #8A7420  muted brass
-   dartRed   #B7282E  segment red
-   dartGreen #0B6E4F  segment green
-   cream     #EDE6D2  primary text
-   muted     #8C8873  secondary text
 --------------------------------------------------------- */
-
 const COLORS = {
   void: "#14140F",
   felt: "#17301F",
@@ -87,7 +77,39 @@ const COLORS = {
 const FONT_IMPORT = `@import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap');`;
 
 /* ---------------------------------------------------------
-   SPLIT-FLAP DIGIT — the signature element
+   DARTBOARD GEOMETRY (regulation ratios, relative to the
+   outer edge of the double ring = 1.0)
+--------------------------------------------------------- */
+const RING = {
+  bullseye: 0.0374, // double bull (50)
+  outerBull: 0.0935, // single bull (25)
+  tripleInner: 0.582,
+  tripleOuter: 0.629,
+  doubleInner: 0.953,
+  doubleOuter: 1.0,
+};
+const SEGMENT_ORDER = [20, 1, 18, 4, 13, 6, 10, 15, 2, 17, 3, 19, 7, 16, 8, 11, 14, 9, 12, 5];
+const SEGMENTS = Array.from({ length: 20 }, (_, i) => i + 1);
+
+function computeThrowFromTap(dx, dy, r) {
+  const dist = Math.hypot(dx, dy);
+  const frac = dist / r;
+  if (frac > 1.06) return { value: 0, label: "Miss" };
+  if (frac <= RING.bullseye) return { value: 50, label: "Bull" };
+  if (frac <= RING.outerBull) return { value: 25, label: "25" };
+  const angle = (Math.atan2(dx, -dy) * 180) / Math.PI;
+  const normalized = (angle + 360) % 360;
+  const idx = Math.floor(((normalized + 9) % 360) / 18);
+  const num = SEGMENT_ORDER[idx];
+  let mult = 1;
+  if (frac >= RING.tripleInner && frac <= RING.tripleOuter) mult = 3;
+  else if (frac >= RING.doubleInner && frac <= RING.doubleOuter) mult = 2;
+  const label = `${mult === 3 ? "T" : mult === 2 ? "D" : ""}${num}`;
+  return { value: num * mult, label };
+}
+
+/* ---------------------------------------------------------
+   SPLIT-FLAP DIGIT
 --------------------------------------------------------- */
 function FlapDigit({ char }) {
   return (
@@ -96,7 +118,7 @@ function FlapDigit({ char }) {
       style={{
         display: "inline-block",
         fontFamily: "'Bebas Neue', sans-serif",
-        fontSize: "clamp(2.2rem, 7vw, 3.6rem)",
+        fontSize: "clamp(2rem, 6.5vw, 3.4rem)",
         lineHeight: 1,
         color: COLORS.cream,
         background: "linear-gradient(180deg, #201F17 0%, #131209 100%)",
@@ -126,7 +148,7 @@ function FlapDigit({ char }) {
   );
 }
 
-function FlapNumber({ value, digits = 3 }) {
+function FlapNumber({ value, digits = 4 }) {
   const str = String(Math.max(0, value)).padStart(digits, "0");
   return (
     <div style={{ display: "flex", justifyContent: "center" }}>
@@ -138,12 +160,18 @@ function FlapNumber({ value, digits = 3 }) {
 }
 
 /* ---------------------------------------------------------
-   CAMERA PANEL
+   CAMERA SCORING PANEL
 --------------------------------------------------------- */
-function CameraPanel() {
+function CameraScoringPanel({ dartsPerTurn, turnDartsCount, onConfirmThrow }) {
   const videoRef = useRef(null);
+  const containerRef = useRef(null);
   const [status, setStatus] = useState("idle"); // idle | requesting | live | error
   const [errMsg, setErrMsg] = useState("");
+  const [mode, setMode] = useState("idle"); // idle | calibrate-center | calibrate-edge | score
+  const [calib, setCalib] = useState(null); // {cx, cy, r}
+  const [tempCenter, setTempCenter] = useState(null);
+  const [size, setSize] = useState({ w: 400, h: 250 });
+  const [pending, setPending] = useState(null); // {value, label, x, y}
 
   const startCamera = useCallback(async () => {
     setStatus("requesting");
@@ -174,6 +202,59 @@ function CameraPanel() {
     };
   }, []);
 
+  useLayoutEffect(() => {
+    if (!containerRef.current) return;
+    const el = containerRef.current;
+    const update = () => setSize({ w: el.clientWidth, h: el.clientHeight });
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [status]);
+
+  const startCalibration = () => {
+    setCalib(null);
+    setTempCenter(null);
+    setPending(null);
+    setMode("calibrate-center");
+  };
+
+  const handleTap = (e) => {
+    if (!containerRef.current) return;
+    const rect = containerRef.current.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+
+    if (mode === "calibrate-center") {
+      setTempCenter({ x, y });
+      setMode("calibrate-edge");
+      return;
+    }
+    if (mode === "calibrate-edge" && tempCenter) {
+      const r = Math.hypot(x - tempCenter.x, y - tempCenter.y);
+      if (r > 4) {
+        setCalib({ cx: tempCenter.x, cy: tempCenter.y, r });
+        setMode("score");
+      }
+      return;
+    }
+    if (mode === "score" && calib && turnDartsCount < dartsPerTurn) {
+      const result = computeThrowFromTap(x - calib.cx, y - calib.cy, calib.r);
+      setPending({ ...result, x, y });
+    }
+  };
+
+  const confirmPending = () => {
+    if (pending) onConfirmThrow(pending.value, pending.label);
+    setPending(null);
+  };
+
+  const ringRadii = calib
+    ? [RING.bullseye, RING.outerBull, RING.tripleInner, RING.tripleOuter, RING.doubleInner, RING.doubleOuter].map(
+        (r) => r * calib.r
+      )
+    : [];
+
   return (
     <div
       style={{
@@ -185,8 +266,7 @@ function CameraPanel() {
         position: "relative",
       }}
     >
-      {/* corner bolts */}
-      {["6px,6px", "6px,auto,6px", "auto,6px,auto,6px", "auto,auto,6px,6px"].map((_, i) => (
+      {[0, 1, 2, 3].map((i) => (
         <span
           key={i}
           style={{
@@ -204,6 +284,7 @@ function CameraPanel() {
       ))}
 
       <div
+        ref={containerRef}
         style={{
           position: "relative",
           aspectRatio: "16 / 10",
@@ -238,7 +319,6 @@ function CameraPanel() {
               textAlign: "center",
             }}
           >
-            {/* ambient dartboard rings */}
             <div
               style={{
                 position: "absolute",
@@ -302,46 +382,208 @@ function CameraPanel() {
         )}
 
         {status === "live" && (
+          <>
+            <svg
+              width="100%"
+              height="100%"
+              viewBox={`0 0 ${size.w} ${size.h}`}
+              style={{ position: "absolute", inset: 0, pointerEvents: "none" }}
+            >
+              {calib &&
+                ringRadii.map((r, i) => (
+                  <circle
+                    key={i}
+                    cx={calib.cx}
+                    cy={calib.cy}
+                    r={r}
+                    fill="none"
+                    stroke={COLORS.brass}
+                    strokeWidth={1}
+                    opacity={0.55}
+                  />
+                ))}
+              {calib &&
+                Array.from({ length: 20 }).map((_, i) => {
+                  const a = ((i * 18 - 9 + 360) % 360) * (Math.PI / 180);
+                  const x2 = calib.cx + Math.sin(a) * calib.r * RING.doubleOuter;
+                  const y2 = calib.cy - Math.cos(a) * calib.r * RING.doubleOuter;
+                  const x1 = calib.cx + Math.sin(a) * calib.r * RING.outerBull;
+                  const y1 = calib.cy - Math.cos(a) * calib.r * RING.outerBull;
+                  return (
+                    <line key={i} x1={x1} y1={y1} x2={x2} y2={y2} stroke={COLORS.brass} strokeWidth={0.75} opacity={0.4} />
+                  );
+                })}
+              {tempCenter && mode === "calibrate-edge" && (
+                <circle cx={tempCenter.x} cy={tempCenter.y} r={5} fill={COLORS.dartRed} />
+              )}
+              {pending && (
+                <circle cx={pending.x} cy={pending.y} r={7} fill="none" stroke={COLORS.dartRed} strokeWidth={2.5} />
+              )}
+            </svg>
+
+            <div
+              onClick={handleTap}
+              style={{
+                position: "absolute",
+                inset: 0,
+                cursor: mode === "idle" || mode === "score" ? "default" : "crosshair",
+              }}
+            />
+
+            <div
+              style={{
+                position: "absolute",
+                top: 10,
+                left: 10,
+                display: "flex",
+                alignItems: "center",
+                gap: 6,
+                background: "rgba(10,10,8,0.6)",
+                padding: "4px 10px 4px 8px",
+                borderRadius: 20,
+              }}
+            >
+              <span
+                style={{
+                  width: 8,
+                  height: 8,
+                  borderRadius: "50%",
+                  background: COLORS.dartRed,
+                  animation: "blink 1.4s ease-in-out infinite",
+                }}
+              />
+              <span style={{ fontFamily: "'JetBrains Mono'", fontSize: 11, color: COLORS.cream, letterSpacing: 1 }}>
+                LIVE
+              </span>
+            </div>
+
+            {(mode === "calibrate-center" || mode === "calibrate-edge") && (
+              <div
+                style={{
+                  position: "absolute",
+                  bottom: 10,
+                  left: 10,
+                  right: 10,
+                  background: "rgba(10,10,8,0.75)",
+                  borderRadius: 6,
+                  padding: "8px 12px",
+                  fontFamily: "'Inter'",
+                  fontSize: 12.5,
+                  color: COLORS.cream,
+                  textAlign: "center",
+                }}
+              >
+                {mode === "calibrate-center"
+                  ? "Tap the bullseye (board center)"
+                  : "Now tap the outer edge of the board"}
+              </div>
+            )}
+
+            {!calib && mode === "idle" && (
+              <div style={{ position: "absolute", bottom: 10, left: 10, right: 10, textAlign: "center" }}>
+                <button onClick={startCalibration} style={smallBrassBtn}>
+                  Calibrate board
+                </button>
+              </div>
+            )}
+
+            {calib && mode === "score" && (
+              <div style={{ position: "absolute", bottom: 10, right: 10 }}>
+                <button onClick={startCalibration} style={smallGhostBtn}>
+                  Recalibrate
+                </button>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+
+      {pending && (
+        <div
+          style={{
+            marginTop: 10,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            background: COLORS.void,
+            border: `1px solid ${COLORS.brassDim}`,
+            borderRadius: 8,
+            padding: "10px 14px",
+          }}
+        >
+          <div style={{ fontFamily: "'JetBrains Mono'", fontSize: 13, color: COLORS.cream }}>
+            Detected <strong style={{ color: COLORS.brass }}>{pending.label}</strong> · {pending.value} pts
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={() => setPending(null)} style={smallGhostBtn}>
+              Edit manually
+            </button>
+            <button onClick={confirmPending} style={smallBrassBtn}>
+              Confirm
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ---------------------------------------------------------
+   LEADERBOARD
+--------------------------------------------------------- */
+function Leaderboard({ players }) {
+  const ranked = [...players].sort((a, b) => b.score - a.score);
+  return (
+    <div>
+      <FieldLabel>Leaderboard</FieldLabel>
+      <div
+        style={{
+          background: COLORS.feltDeep,
+          border: `1px solid ${COLORS.brassDim}`,
+          borderRadius: 8,
+          overflow: "hidden",
+        }}
+      >
+        {ranked.map((p, i) => (
           <div
+            key={p.name + i}
             style={{
-              position: "absolute",
-              top: 10,
-              left: 10,
               display: "flex",
               alignItems: "center",
-              gap: 6,
-              background: "rgba(10,10,8,0.6)",
-              padding: "4px 10px 4px 8px",
-              borderRadius: 20,
-              backdropFilter: "blur(2px)",
+              gap: 12,
+              padding: "10px 14px",
+              background: i === 0 ? "rgba(201,162,39,0.12)" : "transparent",
+              borderBottom: i === ranked.length - 1 ? "none" : `1px solid rgba(201,162,39,0.1)`,
             }}
           >
             <span
               style={{
-                width: 8,
-                height: 8,
-                borderRadius: "50%",
-                background: COLORS.dartRed,
-                animation: "blink 1.4s ease-in-out infinite",
+                fontFamily: "'Bebas Neue'",
+                fontSize: 18,
+                color: i === 0 ? COLORS.brass : COLORS.muted,
+                width: 22,
               }}
-            />
-            <span style={{ fontFamily: "'JetBrains Mono'", fontSize: 11, color: COLORS.cream, letterSpacing: 1 }}>
-              LIVE
+            >
+              {i + 1}
+            </span>
+            <span style={{ fontFamily: "'Inter'", fontWeight: 600, fontSize: 14, color: COLORS.cream, flex: 1 }}>
+              {p.name}
+            </span>
+            <span style={{ fontFamily: "'JetBrains Mono'", fontSize: 14, color: COLORS.brass, fontWeight: 700 }}>
+              {p.score}
             </span>
           </div>
-        )}
+        ))}
       </div>
     </div>
   );
 }
 
 /* ---------------------------------------------------------
-   GAME LOGIC HELPERS
+   GAME HELPERS
 --------------------------------------------------------- */
-const SEGMENTS = Array.from({ length: 20 }, (_, i) => i + 1);
-
 function newPlayer(name) {
-  return { name, score: 0, legs: 0, history: [] };
+  return { name, score: 0 };
 }
 
 /* ---------------------------------------------------------
@@ -350,10 +592,14 @@ function newPlayer(name) {
 function DartScoreboard() {
   const [phase, setPhase] = useState("setup"); // setup | playing | finished
   const [names, setNames] = useState(["Player 1", "Player 2"]);
+  const [dartsPerTurn, setDartsPerTurn] = useState(3);
+  const [roundLimitEnabled, setRoundLimitEnabled] = useState(false);
+  const [roundLimit, setRoundLimit] = useState(8);
 
   const [players, setPlayers] = useState([]);
   const [currentIdx, setCurrentIdx] = useState(0);
-  const [turnDarts, setTurnDarts] = useState([]); // {label, value}
+  const [round, setRound] = useState(1);
+  const [turnDarts, setTurnDarts] = useState([]);
   const [multiplier, setMultiplier] = useState(1);
   const [log, setLog] = useState([]);
   const [winner, setWinner] = useState(null);
@@ -361,12 +607,22 @@ function DartScoreboard() {
   const addPlayerField = () => setNames((n) => [...n, `Player ${n.length + 1}`]);
   const removePlayerField = (i) => setNames((n) => n.filter((_, idx) => idx !== i));
   const updateName = (i, val) => setNames((n) => n.map((x, idx) => (idx === i ? val : x)));
+  const moveName = (i, dir) => {
+    setNames((n) => {
+      const arr = [...n];
+      const j = i + dir;
+      if (j < 0 || j >= arr.length) return arr;
+      [arr[i], arr[j]] = [arr[j], arr[i]];
+      return arr;
+    });
+  };
 
   const startGame = () => {
     const cleaned = names.map((n) => n.trim()).filter(Boolean);
     if (cleaned.length === 0) return;
     setPlayers(cleaned.map((n) => newPlayer(n)));
     setCurrentIdx(0);
+    setRound(1);
     setTurnDarts([]);
     setLog([]);
     setWinner(null);
@@ -378,43 +634,55 @@ function DartScoreboard() {
   const projected = currentPlayer ? currentPlayer.score + turnTotal : 0;
 
   const throwDart = (segmentValue, label) => {
-    if (turnDarts.length >= 3 || phase !== "playing") return;
+    if (turnDarts.length >= dartsPerTurn || phase !== "playing") return;
     const value = segmentValue * multiplier;
     setTurnDarts((d) => [...d, { label, value }]);
     setMultiplier(1);
   };
 
+  const addComputedDart = (value, label) => {
+    if (turnDarts.length >= dartsPerTurn || phase !== "playing") return;
+    setTurnDarts((d) => [...d, { label, value }]);
+  };
+
   const undoDart = () => setTurnDarts((d) => d.slice(0, -1));
+
+  const finishMatchWith = (updatedPlayers) => {
+    const top = updatedPlayers.reduce((best, p) => (p.score > best.score ? p : best), updatedPlayers[0]);
+    setWinner(top.name);
+    setPhase("finished");
+  };
 
   const endTurn = () => {
     if (!currentPlayer) return;
     const total = turnDarts.reduce((s, d) => s + d.value, 0);
     const newScore = currentPlayer.score + total;
     const throwsLabel = turnDarts.map((d) => d.label).join(", ") || "—";
+    const updatedPlayers = players.map((p, idx) => (idx !== currentIdx ? p : { ...p, score: newScore }));
 
-    setPlayers((prev) =>
-      prev.map((p, idx) => (idx !== currentIdx ? p : { ...p, score: newScore }))
-    );
-
+    setPlayers(updatedPlayers);
     setLog((l) => [
-      {
-        player: currentPlayer.name,
-        throws: throwsLabel,
-        total,
-        result: `+${total} \u2192 ${newScore}`,
-      },
+      { player: currentPlayer.name, throws: throwsLabel, total, result: `+${total} \u2192 ${newScore}` },
       ...l,
     ]);
-
     setTurnDarts([]);
-    setCurrentIdx((i) => (i + 1) % players.length);
+
+    const isLastPlayerOfRound = currentIdx === players.length - 1;
+    if (isLastPlayerOfRound) {
+      if (roundLimitEnabled && round >= roundLimit) {
+        finishMatchWith(updatedPlayers);
+        return;
+      }
+      setRound((r) => r + 1);
+      setCurrentIdx(0);
+    } else {
+      setCurrentIdx((i) => i + 1);
+    }
   };
 
   const endMatch = () => {
     if (players.length === 0) return;
-    const top = players.reduce((best, p) => (p.score > best.score ? p : best), players[0]);
-    setWinner(top.name);
-    setPhase("finished");
+    finishMatchWith(players);
   };
 
   const newGame = () => setPhase("setup");
@@ -429,7 +697,15 @@ function DartScoreboard() {
           <Panel>
             <FieldLabel>Players</FieldLabel>
             {names.map((n, i) => (
-              <div key={i} style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+              <div key={i} style={{ display: "flex", gap: 6, marginBottom: 8 }}>
+                <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                  <button onClick={() => moveName(i, -1)} disabled={i === 0} style={arrowBtn}>
+                    ▲
+                  </button>
+                  <button onClick={() => moveName(i, 1)} disabled={i === names.length - 1} style={arrowBtn}>
+                    ▼
+                  </button>
+                </div>
                 <input
                   value={n}
                   onChange={(e) => updateName(i, e.target.value)}
@@ -451,14 +727,41 @@ function DartScoreboard() {
               Everyone starts at 0 — each throw adds to the total.
             </p>
 
-            <button onClick={startGame} style={{ ...primaryBtn, width: "100%", marginTop: 6 }}>
+            <FieldLabel style={{ marginTop: 20 }}>Darts per turn</FieldLabel>
+            <Stepper value={dartsPerTurn} onChange={setDartsPerTurn} min={1} max={9} />
+
+            <label
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 10,
+                marginTop: 22,
+                fontFamily: "'Inter'",
+                fontSize: 14,
+                color: COLORS.cream,
+                cursor: "pointer",
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={roundLimitEnabled}
+                onChange={(e) => setRoundLimitEnabled(e.target.checked)}
+                style={{ width: 16, height: 16, accentColor: COLORS.brass }}
+              />
+              Limit the match to a fixed number of rounds
+            </label>
+
+            {roundLimitEnabled && (
+              <div style={{ marginTop: 12 }}>
+                <FieldLabel>Rounds</FieldLabel>
+                <Stepper value={roundLimit} onChange={setRoundLimit} min={1} max={99} />
+              </div>
+            )}
+
+            <button onClick={startGame} style={{ ...primaryBtn, width: "100%", marginTop: 26 }}>
               Start match
             </button>
           </Panel>
-
-          <div style={{ marginTop: 24 }}>
-            <CameraPanel />
-          </div>
         </div>
       </Shell>
     );
@@ -472,21 +775,18 @@ function DartScoreboard() {
           <p style={{ fontFamily: "'JetBrains Mono'", color: COLORS.brass, letterSpacing: 2, fontSize: 12, marginBottom: 10 }}>
             MATCH OVER
           </p>
-          <h1
-            style={{
-              fontFamily: "'Bebas Neue'",
-              fontSize: "clamp(2.5rem,10vw,4rem)",
-              color: COLORS.cream,
-              margin: 0,
-            }}
-          >
+          <h1 style={{ fontFamily: "'Bebas Neue'", fontSize: "clamp(2.5rem,10vw,4rem)", color: COLORS.cream, margin: 0 }}>
             {winner} wins
           </h1>
-          <button onClick={newGame} style={{ ...primaryBtn, marginTop: 30 }}>
+          <button onClick={newGame} style={{ ...primaryBtn, marginTop: 30, marginBottom: 30 }}>
             New match
           </button>
 
-          <div style={{ marginTop: 40, textAlign: "left" }}>
+          <div style={{ textAlign: "left" }}>
+            <Leaderboard players={players} />
+          </div>
+
+          <div style={{ marginTop: 24, textAlign: "left" }}>
             <ThrowLog log={log} />
           </div>
         </div>
@@ -498,36 +798,30 @@ function DartScoreboard() {
   return (
     <Shell>
       <div style={{ maxWidth: 1000, margin: "0 auto", padding: "28px 16px 60px" }}>
-        <Header subtitle="Live scoring" compact />
+        <Header subtitle={`Round ${round}${roundLimitEnabled ? ` / ${roundLimit}` : ""}`} compact />
         <div style={{ display: "flex", justifyContent: "center", marginTop: -14, marginBottom: 20 }}>
           <button onClick={endMatch} style={{ ...ghostBtn, fontSize: 12 }}>
             End match
           </button>
         </div>
 
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "1fr",
-            gap: 20,
-          }}
-          className="dart-grid"
-        >
+        <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 20 }} className="dart-grid">
           <style>{`
             @media (min-width: 860px) {
               .dart-grid { grid-template-columns: 1.1fr 1fr; }
             }
           `}</style>
 
-          {/* LEFT: camera + log */}
-          <div>
-            <CameraPanel />
-            <div style={{ marginTop: 20 }}>
-              <ThrowLog log={log} />
-            </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+            <CameraScoringPanel
+              dartsPerTurn={dartsPerTurn}
+              turnDartsCount={turnDarts.length}
+              onConfirmThrow={addComputedDart}
+            />
+            <Leaderboard players={players} />
+            <ThrowLog log={log} />
           </div>
 
-          {/* RIGHT: scoreboard + keypad */}
           <div>
             <div style={{ display: "flex", flexDirection: "column", gap: 12, marginBottom: 20 }}>
               {players.map((p, idx) => (
@@ -563,12 +857,11 @@ function DartScoreboard() {
                       </p>
                     )}
                   </div>
-                  <FlapNumber value={idx === currentIdx ? Math.max(projected, 0) : p.score} />
+                  <FlapNumber value={idx === currentIdx ? projected : p.score} />
                 </div>
               ))}
             </div>
 
-            {/* KEYPAD */}
             <Panel>
               <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
                 {[
@@ -591,19 +884,12 @@ function DartScoreboard() {
                 ))}
               </div>
 
-              <div
-                style={{
-                  display: "grid",
-                  gridTemplateColumns: "repeat(5, 1fr)",
-                  gap: 6,
-                  marginBottom: 10,
-                }}
-              >
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 6, marginBottom: 10 }}>
                 {SEGMENTS.map((n) => (
                   <button
                     key={n}
                     onClick={() => throwDart(n, `${multiplier === 2 ? "D" : multiplier === 3 ? "T" : ""}${n}`)}
-                    disabled={turnDarts.length >= 3}
+                    disabled={turnDarts.length >= dartsPerTurn}
                     style={numBtn}
                   >
                     {n}
@@ -614,14 +900,14 @@ function DartScoreboard() {
               <div style={{ display: "flex", gap: 6, marginBottom: 14 }}>
                 <button
                   onClick={() => throwDart(25, multiplier === 2 ? "Bull" : "25")}
-                  disabled={turnDarts.length >= 3}
+                  disabled={turnDarts.length >= dartsPerTurn}
                   style={{ ...numBtn, flex: 1 }}
                 >
                   {multiplier === 2 ? "Bullseye (50)" : "25"}
                 </button>
                 <button
                   onClick={() => throwDart(0, "Miss")}
-                  disabled={turnDarts.length >= 3}
+                  disabled={turnDarts.length >= dartsPerTurn}
                   style={{ ...numBtn, flex: 1, color: COLORS.dartRed }}
                 >
                   Miss
@@ -637,7 +923,7 @@ function DartScoreboard() {
                   disabled={turnDarts.length === 0}
                   style={{ ...primaryBtn, flex: 2, opacity: turnDarts.length === 0 ? 0.5 : 1 }}
                 >
-                  End turn ({turnDarts.length}/3 darts)
+                  End turn ({turnDarts.length}/{dartsPerTurn} darts)
                 </button>
               </div>
             </Panel>
@@ -688,16 +974,7 @@ function Shell({ children }) {
 function Header({ subtitle, compact }) {
   return (
     <div style={{ textAlign: "center", marginBottom: compact ? 20 : 34 }}>
-      <p
-        style={{
-          fontFamily: "'JetBrains Mono'",
-          fontSize: 11,
-          letterSpacing: 3,
-          color: COLORS.brass,
-          margin: 0,
-          marginBottom: 6,
-        }}
-      >
+      <p style={{ fontFamily: "'JetBrains Mono'", fontSize: 11, letterSpacing: 3, color: COLORS.brass, margin: 0, marginBottom: 6 }}>
         OCHE · LIVE
       </p>
       <h1
@@ -718,14 +995,7 @@ function Header({ subtitle, compact }) {
 
 function Panel({ children }) {
   return (
-    <div
-      style={{
-        background: COLORS.feltDeep,
-        border: `1px solid ${COLORS.brassDim}`,
-        borderRadius: 10,
-        padding: 20,
-      }}
-    >
+    <div style={{ background: COLORS.feltDeep, border: `1px solid ${COLORS.brassDim}`, borderRadius: 10, padding: 20 }}>
       {children}
     </div>
   );
@@ -750,19 +1020,27 @@ function FieldLabel({ children, style }) {
   );
 }
 
+function Stepper({ value, onChange, min, max }) {
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+      <button onClick={() => onChange(Math.max(min, value - 1))} style={{ ...ghostBtn, width: 40 }}>
+        −
+      </button>
+      <span style={{ fontFamily: "'Bebas Neue'", fontSize: 22, color: COLORS.cream, minWidth: 30, textAlign: "center" }}>
+        {value}
+      </span>
+      <button onClick={() => onChange(Math.min(max, value + 1))} style={{ ...ghostBtn, width: 40 }}>
+        +
+      </button>
+    </div>
+  );
+}
+
 function ThrowLog({ log }) {
   return (
     <div>
       <FieldLabel>Throw log</FieldLabel>
-      <div
-        style={{
-          background: COLORS.feltDeep,
-          border: `1px solid ${COLORS.brassDim}`,
-          borderRadius: 8,
-          maxHeight: 220,
-          overflowY: "auto",
-        }}
-      >
+      <div style={{ background: COLORS.feltDeep, border: `1px solid ${COLORS.brassDim}`, borderRadius: 8, maxHeight: 220, overflowY: "auto" }}>
         {log.length === 0 ? (
           <p style={{ fontFamily: "'Inter'", fontSize: 13, color: COLORS.muted, padding: 16, margin: 0 }}>
             Throws will appear here once the match starts.
@@ -783,15 +1061,7 @@ function ThrowLog({ log }) {
             >
               <span style={{ color: COLORS.cream, minWidth: 90 }}>{entry.player}</span>
               <span style={{ color: COLORS.muted, flex: 1 }}>{entry.throws}</span>
-              <span
-                style={{
-                  color:
-                    entry.result === "BUST" ? COLORS.dartRed : entry.result === "CHECKOUT" ? COLORS.brass : COLORS.muted,
-                  fontWeight: 700,
-                }}
-              >
-                {entry.result}
-              </span>
+              <span style={{ color: COLORS.brass, fontWeight: 700 }}>{entry.result}</span>
             </div>
           ))
         )}
@@ -826,6 +1096,17 @@ const ghostBtn = {
   cursor: "pointer",
 };
 
+const arrowBtn = {
+  background: "transparent",
+  border: `1px solid ${COLORS.brassDim}`,
+  borderRadius: 4,
+  color: COLORS.muted,
+  fontSize: 9,
+  padding: "2px 6px",
+  cursor: "pointer",
+  lineHeight: 1,
+};
+
 const primaryBtn = {
   background: COLORS.brass,
   border: "none",
@@ -857,6 +1138,30 @@ const numBtn = {
   fontSize: 14,
   fontWeight: 700,
   padding: "10px 0",
+  cursor: "pointer",
+};
+
+const smallBrassBtn = {
+  background: COLORS.brass,
+  border: "none",
+  borderRadius: 6,
+  color: COLORS.void,
+  fontFamily: "'Inter'",
+  fontSize: 12.5,
+  fontWeight: 700,
+  padding: "8px 14px",
+  cursor: "pointer",
+};
+
+const smallGhostBtn = {
+  background: "rgba(10,10,8,0.75)",
+  border: `1px solid ${COLORS.brassDim}`,
+  borderRadius: 6,
+  color: COLORS.cream,
+  fontFamily: "'Inter'",
+  fontSize: 12.5,
+  fontWeight: 600,
+  padding: "8px 14px",
   cursor: "pointer",
 };
 
