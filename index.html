@@ -33,7 +33,6 @@
 <body>
 <div id="root"><div id="boot-status">Loading board…<div id="boot-error"></div></div></div>
 <script>
-  // Surface any error visibly instead of a silent blank screen
   window.onerror = function (msg, src, line, col, err) {
     var box = document.getElementById("boot-error");
     if (box) {
@@ -341,8 +340,8 @@ function CameraPanel() {
 --------------------------------------------------------- */
 const SEGMENTS = Array.from({ length: 20 }, (_, i) => i + 1);
 
-function newPlayer(name, start) {
-  return { name, score: start, legs: 0, history: [] };
+function newPlayer(name) {
+  return { name, score: 0, legs: 0, history: [] };
 }
 
 /* ---------------------------------------------------------
@@ -351,12 +350,10 @@ function newPlayer(name, start) {
 function DartScoreboard() {
   const [phase, setPhase] = useState("setup"); // setup | playing | finished
   const [names, setNames] = useState(["Player 1", "Player 2"]);
-  const [startScore, setStartScore] = useState(501);
-  const [doubleOut, setDoubleOut] = useState(false);
 
   const [players, setPlayers] = useState([]);
   const [currentIdx, setCurrentIdx] = useState(0);
-  const [turnDarts, setTurnDarts] = useState([]); // {label, value, isDouble}
+  const [turnDarts, setTurnDarts] = useState([]); // {label, value}
   const [multiplier, setMultiplier] = useState(1);
   const [log, setLog] = useState([]);
   const [winner, setWinner] = useState(null);
@@ -368,7 +365,7 @@ function DartScoreboard() {
   const startGame = () => {
     const cleaned = names.map((n) => n.trim()).filter(Boolean);
     if (cleaned.length === 0) return;
-    setPlayers(cleaned.map((n) => newPlayer(n, startScore)));
+    setPlayers(cleaned.map((n) => newPlayer(n)));
     setCurrentIdx(0);
     setTurnDarts([]);
     setLog([]);
@@ -378,12 +375,12 @@ function DartScoreboard() {
 
   const turnTotal = turnDarts.reduce((s, d) => s + d.value, 0);
   const currentPlayer = players[currentIdx];
-  const projected = currentPlayer ? currentPlayer.score - turnTotal : 0;
+  const projected = currentPlayer ? currentPlayer.score + turnTotal : 0;
 
-  const throwDart = (segmentValue, label, isDouble) => {
+  const throwDart = (segmentValue, label) => {
     if (turnDarts.length >= 3 || phase !== "playing") return;
     const value = segmentValue * multiplier;
-    setTurnDarts((d) => [...d, { label, value, isDouble: isDouble && multiplier === 2 }]);
+    setTurnDarts((d) => [...d, { label, value }]);
     setMultiplier(1);
   };
 
@@ -392,43 +389,32 @@ function DartScoreboard() {
   const endTurn = () => {
     if (!currentPlayer) return;
     const total = turnDarts.reduce((s, d) => s + d.value, 0);
-    const remaining = currentPlayer.score - total;
-    const lastDartDouble = turnDarts.length > 0 && turnDarts[turnDarts.length - 1].isDouble;
-
-    let bust = false;
-    if (remaining < 0) bust = true;
-    if (remaining === 0 && doubleOut && !lastDartDouble) bust = true;
-    if (remaining === 1 && doubleOut) bust = true;
-
+    const newScore = currentPlayer.score + total;
     const throwsLabel = turnDarts.map((d) => d.label).join(", ") || "—";
 
     setPlayers((prev) =>
-      prev.map((p, idx) => {
-        if (idx !== currentIdx) return p;
-        if (bust) return p;
-        return { ...p, score: remaining, legs: remaining === 0 ? p.legs + 1 : p.legs };
-      })
+      prev.map((p, idx) => (idx !== currentIdx ? p : { ...p, score: newScore }))
     );
 
     setLog((l) => [
       {
         player: currentPlayer.name,
         throws: throwsLabel,
-        total: bust ? 0 : total,
-        result: bust ? "BUST" : remaining === 0 ? "CHECKOUT" : `${remaining} left`,
+        total,
+        result: `+${total} \u2192 ${newScore}`,
       },
       ...l,
     ]);
 
-    if (!bust && remaining === 0) {
-      setWinner(currentPlayer.name);
-      setPhase("finished");
-      setTurnDarts([]);
-      return;
-    }
-
     setTurnDarts([]);
     setCurrentIdx((i) => (i + 1) % players.length);
+  };
+
+  const endMatch = () => {
+    if (players.length === 0) return;
+    const top = players.reduce((best, p) => (p.score > best.score ? p : best), players[0]);
+    setWinner(top.name);
+    setPhase("finished");
   };
 
   const newGame = () => setPhase("setup");
@@ -461,46 +447,11 @@ function DartScoreboard() {
               + Add player
             </button>
 
-            <FieldLabel style={{ marginTop: 22 }}>Starting score</FieldLabel>
-            <div style={{ display: "flex", gap: 8 }}>
-              {[301, 501, 701].map((s) => (
-                <button
-                  key={s}
-                  onClick={() => setStartScore(s)}
-                  style={{
-                    ...pillBtn,
-                    flex: 1,
-                    background: startScore === s ? COLORS.brass : "transparent",
-                    color: startScore === s ? COLORS.void : COLORS.cream,
-                  }}
-                >
-                  {s}
-                </button>
-              ))}
-            </div>
+            <p style={{ fontFamily: "'Inter'", fontSize: 13, color: COLORS.muted, marginTop: 20 }}>
+              Everyone starts at 0 — each throw adds to the total.
+            </p>
 
-            <label
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 10,
-                marginTop: 20,
-                fontFamily: "'Inter'",
-                fontSize: 14,
-                color: COLORS.cream,
-                cursor: "pointer",
-              }}
-            >
-              <input
-                type="checkbox"
-                checked={doubleOut}
-                onChange={(e) => setDoubleOut(e.target.checked)}
-                style={{ width: 16, height: 16, accentColor: COLORS.brass }}
-              />
-              Require a double to check out
-            </label>
-
-            <button onClick={startGame} style={{ ...primaryBtn, width: "100%", marginTop: 26 }}>
+            <button onClick={startGame} style={{ ...primaryBtn, width: "100%", marginTop: 6 }}>
               Start match
             </button>
           </Panel>
@@ -519,7 +470,7 @@ function DartScoreboard() {
       <Shell>
         <div style={{ maxWidth: 480, margin: "0 auto", padding: "60px 20px", textAlign: "center" }}>
           <p style={{ fontFamily: "'JetBrains Mono'", color: COLORS.brass, letterSpacing: 2, fontSize: 12, marginBottom: 10 }}>
-            CHECKOUT
+            MATCH OVER
           </p>
           <h1
             style={{
@@ -547,7 +498,12 @@ function DartScoreboard() {
   return (
     <Shell>
       <div style={{ maxWidth: 1000, margin: "0 auto", padding: "28px 16px 60px" }}>
-        <Header subtitle={doubleOut ? "Double out" : "Straight out"} compact />
+        <Header subtitle="Live scoring" compact />
+        <div style={{ display: "flex", justifyContent: "center", marginTop: -14, marginBottom: 20 }}>
+          <button onClick={endMatch} style={{ ...ghostBtn, fontSize: 12 }}>
+            End match
+          </button>
+        </div>
 
         <div
           style={{
@@ -599,7 +555,7 @@ function DartScoreboard() {
                         marginBottom: 4,
                       }}
                     >
-                      {p.name} {p.legs > 0 && <span style={{ color: COLORS.muted, fontWeight: 400 }}>· {p.legs} leg{p.legs > 1 ? "s" : ""}</span>}
+                      {p.name}
                     </p>
                     {idx === currentIdx && turnDarts.length > 0 && (
                       <p style={{ fontFamily: "'JetBrains Mono'", fontSize: 12, color: COLORS.muted, margin: 0 }}>
@@ -646,7 +602,7 @@ function DartScoreboard() {
                 {SEGMENTS.map((n) => (
                   <button
                     key={n}
-                    onClick={() => throwDart(n, `${multiplier === 2 ? "D" : multiplier === 3 ? "T" : ""}${n}`, multiplier === 2)}
+                    onClick={() => throwDart(n, `${multiplier === 2 ? "D" : multiplier === 3 ? "T" : ""}${n}`)}
                     disabled={turnDarts.length >= 3}
                     style={numBtn}
                   >
@@ -657,7 +613,7 @@ function DartScoreboard() {
 
               <div style={{ display: "flex", gap: 6, marginBottom: 14 }}>
                 <button
-                  onClick={() => throwDart(25, multiplier === 2 ? "Bull" : "25", multiplier === 2)}
+                  onClick={() => throwDart(25, multiplier === 2 ? "Bull" : "25")}
                   disabled={turnDarts.length >= 3}
                   style={{ ...numBtn, flex: 1 }}
                 >
